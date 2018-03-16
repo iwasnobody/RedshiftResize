@@ -5,7 +5,7 @@ import time
 clientdms = boto3.client('dms', region_name='ap-northeast-1')
 clientredshift = boto3.client('redshift', region_name='ap-northeast-1')
 
-def stoptask():
+def stoptask(event):
     task = clientdms.describe_replication_tasks(
         Filters=[
             {
@@ -17,12 +17,13 @@ def stoptask():
     for dmstask in task['ReplicationTasks']:
         if dmstask['Status'] == 'running':
             if dmstask['MigrationType'] == 'full-load-and-cdc' or dmstask['MigrationType'] == 'cdc':
+                task_arn = dmstask['ReplicationTaskArn']
                 response = clientdms.stop_replication_task(
-                    ReplicationTaskArn=os.environ['dmstask_arn']
+                    ReplicationTaskArn=task_arn
                 )
-    return {'Action':'status','ExpectStatus':'stopped'}
+    return {'Action':'status','ExpectStatus':'stopped','Error-info':event['Error-info']}
                 
-def starttask():
+def starttask(event):
     task = clientdms.describe_replication_tasks(
         Filters=[
             {
@@ -34,13 +35,14 @@ def starttask():
     for dmstask in task['ReplicationTasks']:
         if dmstask['Status'] == 'stopped':
             if dmstask['MigrationType'] == 'full-load-and-cdc' or dmstask['MigrationType'] == 'cdc':
+                task_arn = dmstask['ReplicationTaskArn']
                 response = clientdms.start_replication_task(
-                    ReplicationTaskArn=os.environ['dmstask_arn'],
+                    ReplicationTaskArn=task_arn,
                     StartReplicationTaskType='resume-processing'
                 )
-    return {'Action':'status','ExpectStatus':'running'}
+    return {'Action':'status','ExpectStatus':'running','Error-info':event['Error-info']}
     
-def checktaskstatus(status):
+def checktaskstatus(event):
     """
     check if all tasks of redshift reach the specified status
     acceptable input is stopped or running
@@ -55,11 +57,11 @@ def checktaskstatus(status):
     )
     for dmstask in task['ReplicationTasks']:
         if dmstask['MigrationType'] == 'full-load-and-cdc' or dmstask['MigrationType'] == 'cdc':
-            if dmstask['Status'] != status:
-                return {'Action':'status','Finished':'False','ExpectStatus':status}
-    return {'Action':'snapshot','Finished':'True'}
+            if dmstask['Status'] != event['ExpectStatus']:
+                return {'Action':'status','Finished':'False','ExpectStatus':event['ExpectStatus'],'Error-info':event['Error-info']}
+    return {'Action':'snapshot','Finished':'True','Error-info':'None','Error-info':event['Error-info']}
     
-def resizeredshift():
+def resizeredshift(event):
     """
     double redshift node size until max node size supported by current node type
     this function will not upgrade node type when max node size is reached
@@ -83,41 +85,41 @@ def resizeredshift():
             NodeType=node_type,
             NumberOfNodes=node_num
         )
-        return {'Action':'resizestatus','ExpectStatus':'available','maxnode':'False'}
+        return {'Action':'resizestatus','ExpectStatus':'available','maxnode':'False','Error-info':event['Error-info']}
     elif redshift['Clusters'][0]['NumberOfNodes'] == max_node_num:
-        return {'Action':'startdms','maxnode':'True'}
+        return {'Action':'startdms','maxnode':'True','Error-info':event['Error-info']}
    
-def checkredshiftstatus(status):
+def checkredshiftstatus(event):
     """
     check redshift status (resizing,available)
     """
     redshift = clientredshift.describe_clusters(
         ClusterIdentifier=os.environ['redshift_name'],
     )
-    if redshift['Clusters'][0]['ClusterStatus'] == status:
+    if redshift['Clusters'][0]['ClusterStatus'] == event['ExpectStatus']:
         return {'Action':'startdms','Finished':'True'}
     else:
-        return {'Action':'resizestatus','ExpectStatus':status,'Finished':'False'}
+        return {'Action':'resizestatus','ExpectStatus':event['ExpectStatus'],'Finished':'False'}
     
-def snapshotredshift():
+def snapshotredshift(event):
     SnapshotId = 'RedshiftResize-'+time.strftime('%Y-%m-%d-%H-%M-%S',time.localtime(time.time()))
     response = clientredshift.create_cluster_snapshot(
         SnapshotIdentifier=SnapshotId,
         ClusterIdentifier=os.environ['redshift_name']
     )
-    return {'Action':'resize'}
+    return {'Action':'resize','Error-info':event['Error-info']}
 
 def lambda_handler(event, context):
     if event['Action'] == 'stopdms':
-        Status = stoptask()
+        Status = stoptask(event)
     elif event['Action'] == 'status':
-        Status = checktaskstatus(event['ExpectStatus'])
+        Status = checktaskstatus(event)
     elif event['Action'] == 'snapshot':
-        Status = snapshotredshift()
+        Status = snapshotredshift(event)
     elif event['Action'] == 'resize':
-        Status = resizeredshift()
+        Status = resizeredshift(event)
     elif event['Action'] == 'resizestatus':
-        Status = checkredshiftstatus(event['ExpectStatus'])
+        Status = checkredshiftstatus(event)
     elif event['Action'] == 'startdms':
-        Status = starttask()        
+        Status = starttask(event)        
     return Status
